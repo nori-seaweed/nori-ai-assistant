@@ -53,33 +53,37 @@ def verify_signature(body: bytes, signature: str) -> bool:
 
 
 async def handle_event(event):
-    async with AsyncApiClient(configuration) as api_client:
-        line_api = AsyncMessagingApi(api_client)
+    user_message = None
+    user_id = None
 
-        user_message = None
+    if isinstance(event, MessageEvent):
+        user_id = event.source.user_id
 
-        if isinstance(event, MessageEvent):
-            if isinstance(event.message, TextMessageContent):
-                user_message = event.message.text
+        if isinstance(event.message, TextMessageContent):
+            user_message = event.message.text
 
-            elif isinstance(event.message, AudioMessageContent):
-                # 音声メッセージの場合はWhisperで文字起こし
-                audio_url = f"https://api-data.line.me/v2/bot/message/{event.message.id}/content"
+        elif isinstance(event.message, AudioMessageContent):
+            # 音声メッセージの場合はWhisperで文字起こし
+            audio_url = f"https://api-data.line.me/v2/bot/message/{event.message.id}/content"
+            async with AsyncApiClient(configuration) as api_client:
+                line_api = AsyncMessagingApi(api_client)
                 await line_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
                         messages=[TextMessage(text="🎙️ 音声を文字起こし中...少し待ってね！")],
                     )
                 )
-                user_message = await transcribe_audio(audio_url, LINE_CHANNEL_ACCESS_TOKEN)
-                # 音声の場合はreply_tokenが使えないのでpush_messageに切り替え
-                await process_and_push(line_api, event.source.user_id, user_message)
-                return
-
-        if not user_message:
+            user_message = await transcribe_audio(audio_url, LINE_CHANNEL_ACCESS_TOKEN)
+            # 音声の場合はreply_tokenが使えないのでpush_messageに切り替え
+            await process_and_push(user_id, user_message)
             return
 
-        # 処理中メッセージを返信
+    if not user_message or not user_id:
+        return
+
+    # 処理中メッセージを返信（別のApiClientで即時送信）
+    async with AsyncApiClient(configuration) as api_client:
+        line_api = AsyncMessagingApi(api_client)
         await line_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
@@ -87,53 +91,55 @@ async def handle_event(event):
             )
         )
 
-        # 非同期でClaudeに処理させる（reply後に継続）
-        asyncio.create_task(
-            process_and_push(line_api, event.source.user_id, user_message)
-        )
+    # 非同期でGeminiに処理させる（reply後に継続、新しいApiClientで）
+    asyncio.create_task(
+        process_and_push(user_id, user_message)
+    )
 
 
-async def process_and_push(line_api, user_id: str, user_message: str):
-    """Claudeで処理 → Notion保存 → LINE push"""
-    try:
-        # Claude処理
-        result = await process_message(user_message)
+async def process_and_push(user_id: str, user_message: str):
+    """Geminiで処理 → Notion保存 → LINE push（独立したApiClientを使用）"""
+    async with AsyncApiClient(configuration) as api_client:
+        line_api = AsyncMessagingApi(api_client)
+        try:
+            # Gemini処理
+            result = await process_message(user_message)
 
-        # Notion保存
-        notion_url = await save_to_notion(
-            title=result["title"],
-            content=result["content"],
-            work_type=result["work_type"],
-            input_text=user_message,
-        )
-
-        # LINE返信（要約 + Notionリンク）
-        content_preview = result["content"][:600]
-        if len(result["content"]) > 600:
-            content_preview += "\n\n..."
-
-        reply_text = (
-            f"✅ 【{result['work_type']}】{result['title']}\n\n"
-            f"{content_preview}\n\n"
-            f"📝 Notionに全文保存したよ👇\n{notion_url}"
-        )
-
-        from linebot.v3.messaging import PushMessageRequest
-        await line_api.push_message(
-            PushMessageRequest(
-                to=user_id,
-                messages=[TextMessage(text=reply_text)],
+            # Notion保存
+            notion_url = await save_to_notion(
+                title=result["title"],
+                content=result["content"],
+                work_type=result["work_type"],
+                input_text=user_message,
             )
-        )
 
-    except Exception as e:
-        from linebot.v3.messaging import PushMessageRequest
-        await line_api.push_message(
-            PushMessageRequest(
-                to=user_id,
-                messages=[TextMessage(text=f"❌ エラーが発生したよ: {str(e)}")],
+            # LINE返信（要約 + Notionリンク）
+            content_preview = result["content"][:600]
+            if len(result["content"]) > 600:
+                content_preview += "\n\n..."
+
+            reply_text = (
+                f"✅ 【{result['work_type']}】{result['title']}\n\n"
+                f"{content_preview}\n\n"
+                f"📝 Notionに全文保存したよ👇\n{notion_url}"
             )
-        )
+
+            from linebot.v3.messaging import PushMessageRequest
+            await line_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text=reply_text)],
+                )
+            )
+
+        except Exception as e:
+            from linebot.v3.messaging import PushMessageRequest
+            await line_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text=f"❌ エラーが発生したよ: {str(e)}")],
+                )
+            )
 
 
 @app.post("/webhook")
