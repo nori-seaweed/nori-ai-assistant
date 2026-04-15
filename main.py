@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from linebot.v3 import WebhookParser
@@ -154,7 +154,7 @@ async def process_and_push(user_id: str, user_message: str):
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
 
@@ -163,9 +163,11 @@ async def webhook(request: Request):
 
     try:
         events = parser.parse(body.decode("utf-8"), signature)
+        print(f"[webhook] Parsed {len(events)} events")
         for event in events:
-            asyncio.create_task(handle_event(event))
+            background_tasks.add_task(handle_event, event)
     except Exception as e:
+        print(f"[webhook] Parse ERROR: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
     return JSONResponse(content={"status": "ok"})
