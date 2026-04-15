@@ -53,11 +53,13 @@ def verify_signature(body: bytes, signature: str) -> bool:
 
 
 async def handle_event(event):
+    print(f"[handle_event] type={type(event).__name__}")
     user_message = None
     user_id = None
 
     if isinstance(event, MessageEvent):
         user_id = event.source.user_id
+        print(f"[handle_event] MessageEvent msg_type={type(event.message).__name__}")
 
         if isinstance(event.message, TextMessageContent):
             user_message = event.message.text
@@ -78,7 +80,9 @@ async def handle_event(event):
             await process_and_push(user_id, user_message)
             return
 
+    print(f"[handle_event] user_id={user_id} user_message={user_message}")
     if not user_message or not user_id:
+        print("[handle_event] No message/user, returning early")
         return
 
     # 処理中メッセージを返信（失敗しても処理は継続）
