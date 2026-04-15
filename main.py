@@ -81,15 +81,18 @@ async def handle_event(event):
     if not user_message or not user_id:
         return
 
-    # 処理中メッセージを返信（別のApiClientで即時送信）
-    async with AsyncApiClient(configuration) as api_client:
-        line_api = AsyncMessagingApi(api_client)
-        await line_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="⚡ 作業中...少し待ってね！")],
+    # 処理中メッセージを返信（失敗しても処理は継続）
+    try:
+        async with AsyncApiClient(configuration) as api_client:
+            line_api = AsyncMessagingApi(api_client)
+            await line_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="⚡ 作業中...少し待ってね！")],
+                )
             )
-        )
+    except Exception:
+        pass  # reply_token失敗は無視してpush_messageで返す
 
     # 非同期でGeminiに処理させる（reply後に継続、新しいApiClientで）
     asyncio.create_task(
