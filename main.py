@@ -2,7 +2,6 @@ import os
 import hashlib
 import hmac
 import base64
-import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
@@ -57,51 +56,53 @@ async def handle_event(event):
     user_message = None
     user_id = None
 
-    if isinstance(event, MessageEvent):
-        user_id = event.source.user_id
-        print(f"[handle_event] MessageEvent msg_type={type(event.message).__name__}")
+    try:
+        if isinstance(event, MessageEvent):
+            user_id = event.source.user_id
+            print(f"[handle_event] MessageEvent user_id={user_id} msg_type={type(event.message).__name__}")
 
-        if isinstance(event.message, TextMessageContent):
-            user_message = event.message.text
+            if isinstance(event.message, TextMessageContent):
+                user_message = event.message.text
 
-        elif isinstance(event.message, AudioMessageContent):
-            # 音声メッセージの場合はWhisperで文字起こし
-            audio_url = f"https://api-data.line.me/v2/bot/message/{event.message.id}/content"
+            elif isinstance(event.message, AudioMessageContent):
+                # 音声メッセージの場合はWhisperで文字起こし
+                audio_url = f"https://api-data.line.me/v2/bot/message/{event.message.id}/content"
+                async with AsyncApiClient(configuration) as api_client:
+                    line_api = AsyncMessagingApi(api_client)
+                    await line_api.reply_message(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[TextMessage(text="🎙️ 音声を文字起こし中...少し待ってね！")],
+                        )
+                    )
+                user_message = await transcribe_audio(audio_url, LINE_CHANNEL_ACCESS_TOKEN)
+                await process_and_push(user_id, user_message)
+                return
+
+        print(f"[handle_event] user_id={user_id} user_message={user_message}")
+        if not user_message or not user_id:
+            print("[handle_event] No message/user, returning early")
+            return
+
+        # 処理中メッセージを返信（失敗しても処理は継続）
+        try:
             async with AsyncApiClient(configuration) as api_client:
                 line_api = AsyncMessagingApi(api_client)
                 await line_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text="🎙️ 音声を文字起こし中...少し待ってね！")],
+                        messages=[TextMessage(text="⚡ 作業中...少し待ってね！")],
                     )
                 )
-            user_message = await transcribe_audio(audio_url, LINE_CHANNEL_ACCESS_TOKEN)
-            # 音声の場合はreply_tokenが使えないのでpush_messageに切り替え
-            await process_and_push(user_id, user_message)
-            return
+            print("[handle_event] Reply sent OK")
+        except Exception as e:
+            print(f"[handle_event] Reply failed (OK to ignore): {e}")
 
-    print(f"[handle_event] user_id={user_id} user_message={user_message}")
-    if not user_message or not user_id:
-        print("[handle_event] No message/user, returning early")
-        return
+        # handle_eventはすでにバックグラウンドタスクなので直接awaitでOK
+        await process_and_push(user_id, user_message)
 
-    # 処理中メッセージを返信（失敗しても処理は継続）
-    try:
-        async with AsyncApiClient(configuration) as api_client:
-            line_api = AsyncMessagingApi(api_client)
-            await line_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="⚡ 作業中...少し待ってね！")],
-                )
-            )
-    except Exception:
-        pass  # reply_token失敗は無視してpush_messageで返す
-
-    # 非同期でGeminiに処理させる（reply後に継続、新しいApiClientで）
-    asyncio.create_task(
-        process_and_push(user_id, user_message)
-    )
+    except Exception as e:
+        print(f"[handle_event] UNHANDLED ERROR: {type(e).__name__}: {e}")
 
 
 async def process_and_push(user_id: str, user_message: str):
