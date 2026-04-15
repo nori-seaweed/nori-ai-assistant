@@ -102,13 +102,17 @@ async def handle_event(event):
 
 async def process_and_push(user_id: str, user_message: str):
     """Geminiで処理 → Notion保存 → LINE push（独立したApiClientを使用）"""
+    print(f"[process_and_push] START user={user_id} msg={user_message[:30]}")
     async with AsyncApiClient(configuration) as api_client:
         line_api = AsyncMessagingApi(api_client)
         try:
             # Gemini処理
+            print("[process_and_push] Calling Gemini...")
             result = await process_message(user_message)
+            print(f"[process_and_push] Gemini OK: {result['title']}")
 
             # Notion保存
+            print("[process_and_push] Saving to Notion...")
             notion_url = await save_to_notion(
                 title=result["title"],
                 content=result["content"],
@@ -136,13 +140,17 @@ async def process_and_push(user_id: str, user_message: str):
             )
 
         except Exception as e:
-            from linebot.v3.messaging import PushMessageRequest
-            await line_api.push_message(
-                PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text=f"❌ エラーが発生したよ: {str(e)}")],
+            print(f"[process_and_push] ERROR: {type(e).__name__}: {e}")
+            try:
+                from linebot.v3.messaging import PushMessageRequest
+                await line_api.push_message(
+                    PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=f"❌ エラーが発生したよ: {str(e)[:200]}")],
+                    )
                 )
-            )
+            except Exception as push_err:
+                print(f"[process_and_push] PUSH ERROR: {push_err}")
 
 
 @app.post("/webhook")
