@@ -1,10 +1,10 @@
 import os
 import tempfile
 import httpx
-import google.generativeai as genai
+from google import genai
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+MODEL = "gemini-2.5-flash-lite"
 
 
 async def transcribe_audio(audio_url: str, line_access_token: str) -> str:
@@ -21,11 +21,18 @@ async def transcribe_audio(audio_url: str, line_access_token: str) -> str:
         tmp_path = tmp.name
 
     try:
-        audio_file = genai.upload_file(tmp_path, mime_type="audio/m4a")
-        result = model.generate_content([
-            "この音声を日本語でそのまま文字起こししてください。文字起こし内容だけを返してください。",
-            audio_file
-        ])
+        # 音声ファイルをアップロードしてGeminiで文字起こし
+        audio_file = client.files.upload(
+            file=tmp_path,
+            config={"mime_type": "audio/m4a"}
+        )
+        result = client.models.generate_content(
+            model=MODEL,
+            contents=[
+                "この音声を日本語でそのまま文字起こししてください。文字起こし内容だけを返してください。",
+                audio_file
+            ]
+        )
         return result.text
     finally:
         os.unlink(tmp_path)
