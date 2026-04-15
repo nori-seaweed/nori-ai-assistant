@@ -180,3 +180,15 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 @app.get("/health")
 async def health():
     return {"status": "running", "message": "ノリのAIアシスタント稼働中 🚀"}
+
+
+@app.post("/test-push")
+async def test_push(request: Request):
+    """デバッグ用: Gemini処理→Notion保存→LINE pushを直接テスト"""
+    data = await request.json()
+    user_id = data.get("user_id", "Uf62b7e1b6f0574e31a6a1d0f1c91b2ae")
+    message = data.get("message", "テスト")
+    print(f"[test-push] START user={user_id} msg={message}")
+    await process_and_push(user_id, message)
+    print("[test-push] DONE")
+    return {"status": "done"}
