@@ -27,6 +27,9 @@ load_dotenv()
 from handlers.claude_handler import process_message
 from handlers.notion_handler import save_to_notion
 from handlers.whisper_handler import transcribe_audio
+from handlers import music_workflow
+from handlers import line_notifier
+from handlers import job_store
 
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -37,6 +40,7 @@ parser = WebhookParser(LINE_CHANNEL_SECRET)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    job_store.init_db()
     yield
 
 
@@ -82,6 +86,27 @@ async def handle_event(event):
         print(f"[handle_event] user_id={user_id} user_message={user_message}")
         if not user_message or not user_id:
             print("[handle_event] No message/user, returning early")
+            return
+
+        # 音楽生成ワークフローのコマンドは専用ルーターに振り分け
+        if music_workflow.is_music_command(user_message):
+            try:
+                async with AsyncApiClient(configuration) as api_client:
+                    line_api = AsyncMessagingApi(api_client)
+                    await line_api.reply_message(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[TextMessage(text="🎵 音楽ワークフローを処理中...")],
+                        )
+                    )
+            except Exception as e:
+                print(f"[handle_event] Music reply failed: {e}")
+            try:
+                result_text = await music_workflow.handle(user_id, user_message)
+                await line_notifier.push(user_id, result_text)
+            except Exception as e:
+                print(f"[handle_event] music_workflow ERROR: {type(e).__name__}: {e}")
+                await line_notifier.push(user_id, f"❌ 音楽ワークフロー失敗: {str(e)[:300]}")
             return
 
         # 処理中メッセージを返信（失敗しても処理は継続）

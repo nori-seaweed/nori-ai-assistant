@@ -17,3 +17,27 @@ services:
         sync: false
       - key: NOTION_DATABASE_ID
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SUNOAPI_KEY
+        sync: false
+      - key: SUNOAPI_BASE
+        value: https://api.sunoapi.org
+      - key: SUNOAPI_MODEL
+        value: V4
+      - key: SUNOAPI_CALLBACK_URL
+        sync: false
+      - key: YOUTUBE_CLIENT_ID
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_REFRESH_TOKEN
+        sync: false
+      - key: YOUTUBE_PRIVACY
+        value: public
+      - key: JOB_DB_PATH
+        value: /tmp/nori_jobs.db
+      - key: VIDEO_DIR
+        value: /tmp/nori_videos
+      - key: AUDIO_DIR
+        value: /tmp/nori_audio
