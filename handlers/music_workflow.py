@@ -1,14 +1,16 @@
 """
-LINE主導の音楽生成ワークフロー。各ステップでユーザー承認を求める。
+LINE主導の音楽生成ワークフロー（Suno手動 + Bot自動投稿ハイブリッド）。
 
-コマンド (LINE上):
-  曲：<テーマ>           新規ジョブ開始（歌詞生成へ）
-  OK1                   歌詞OK → SUNO生成へ
-  やり直し1 <指示>       歌詞を再生成（指示は任意）
-  OK2                   音源OK → 動画化へ
-  やり直し2             SUNO再生成
-  OK3 タイトル:.. 説明:.. 動画OK → YouTubeへアップ（タイトル/説明上書き任意）
-  状態                   現在のジョブ確認
+ユーザー操作:
+  1. 「曲：<テーマ>」 → Botが歌詞・タイトル・概要欄を生成
+  2. ユーザーがSunoで手動生成 → Public公開 → 共有URLをLINEに送信
+  3. ユーザーがGensparkでサムネ生成 → LINEに画像送信
+  4. 「OK2」 → Botが動画化（静止画+音声波形）
+  5. 「OK3 タイトル:.. 説明:..」 → BotがYouTubeへ自動投稿
+
+その他コマンド:
+  状態                    現在のジョブを表示
+  やり直し1 <指示>        歌詞を再生成
 """
 import os
 import re
@@ -20,52 +22,50 @@ from handlers import suno_handler
 from handlers import video_handler
 from handlers import youtube_handler
 
-YOUTUBE_PRIVACY = os.getenv("YOUTUBE_PRIVACY", "public")  # private/unlisted/public
+YOUTUBE_PRIVACY = os.getenv("YOUTUBE_PRIVACY", "public")
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/tmp/nori_audio")
+THUMB_DIR = os.getenv("THUMB_DIR", "/tmp/nori_thumbs")
 
 
 def is_music_command(text: str) -> bool:
+    """通常のClaude応答ではなく音楽ワークフローに渡すべきメッセージか判定"""
     if not text:
         return False
-    return bool(
-        re.match(r"^\s*(曲[:：]|OK\s*[123]|やり直し\s*[123]|状態\s*$)", text)
-    )
+    if re.match(r"^\s*(曲[:：]|OK\s*[23]|やり直し\s*1|状態\s*$)", text):
+        return True
+    if suno_handler.find_suno_url(text):
+        return True
+    return False
 
 
 async def handle(user_id: str, text: str) -> str:
-    """LINEからの音楽コマンドを処理し、ユーザーに返す文字列を返す"""
     job_store.init_db()
     text = text.strip()
 
-    # 状態確認
     if text == "状態":
         job = job_store.get_latest_job(user_id)
-        if not job:
-            return "🎵 進行中のジョブはないよ。「曲：<テーマ>」で始めてね"
-        return _status_text(job)
+        return _status_text(job) if job else "🎵 進行中のジョブはないよ。「曲：<テーマ>」で始めてね"
 
-    # 新規ジョブ
     m = re.match(r"^曲[:：]\s*(.+)$", text)
     if m:
-        theme = m.group(1).strip()
-        return await _step_lyrics(user_id, theme)
+        return await _step_lyrics(user_id, m.group(1).strip())
 
-    # 進捗確認用にジョブを引く
     job = job_store.get_latest_job(user_id)
     if not job:
         return "🎵 進行中のジョブがないよ。「曲：<テーマ>」で始めてね"
 
-    # 各ステップの承認
-    if re.match(r"^OK\s*1$", text):
-        return await _step_suno(job["id"])
     if re.match(r"^やり直し\s*1", text):
         instruction = re.sub(r"^やり直し\s*1\s*", "", text)
         new_theme = (job["theme"] or "") + (f" / 修正指示: {instruction}" if instruction else "")
         return await _step_lyrics(user_id, new_theme, existing_job_id=job["id"])
+
+    suno_url = suno_handler.find_suno_url(text)
+    if suno_url:
+        return await handle_suno_url(user_id, suno_url, job)
+
     if re.match(r"^OK\s*2$", text):
         return await _step_video(job["id"])
-    if re.match(r"^やり直し\s*2", text):
-        return await _step_suno(job["id"], regenerate=True)
+
     if re.match(r"^OK\s*3", text):
         title_match = re.search(r"タイトル[:：]\s*(.+?)(?=\s+説明[:：]|$)", text)
         desc_match = re.search(r"説明[:：]\s*(.+)$", text)
@@ -73,10 +73,41 @@ async def handle(user_id: str, text: str) -> str:
         custom_desc = desc_match.group(1).strip() if desc_match else None
         return await _step_youtube(job["id"], custom_title, custom_desc)
 
+    return _help_text()
+
+
+async def handle_suno_url(user_id: str, suno_url: str, job: dict = None) -> str:
+    """SunoのURLを受け取り、MP3を非同期でDLしてジョブに紐付ける"""
+    job_store.init_db()
+    if job is None:
+        job = job_store.get_latest_job(user_id)
+    if not job:
+        return "🎵 先に「曲：<テーマ>」でジョブを始めてね"
+    job_store.update_job(job["id"], suno_url=suno_url)
+    asyncio.create_task(_resolve_and_download_suno(job["id"], suno_url))
+    return f"🎵 SunoのURLを受け取ったよ (job {job['id']})。MP3取得中..."
+
+
+async def handle_image(user_id: str, image_path: str) -> str:
+    """LINEの画像メッセージをサムネとしてジョブに紐付ける"""
+    job_store.init_db()
+    job = job_store.get_latest_job(user_id)
+    if not job:
+        return "🖼 先に「曲：<テーマ>」でジョブを始めてね"
+    job_store.update_job(job["id"], thumbnail_path=image_path)
+    job = job_store.get_job(job["id"])
+    return _assets_status(job)
+
+
+def _help_text() -> str:
     return (
         "🎵 受け付けたコマンドが分からないよ。\n"
-        "・曲：<テーマ>\n・OK1 / やり直し1\n・OK2 / やり直し2\n"
-        "・OK3 タイトル:〇〇 説明:〇〇\n・状態"
+        "・曲：<テーマ>\n"
+        "・やり直し1 <指示>\n"
+        "・SunoのURLをそのまま貼る\n"
+        "・サムネ画像を送る\n"
+        "・OK2（動画化）/ OK3 タイトル:〇〇 説明:〇〇（投稿）\n"
+        "・状態"
     )
 
 
@@ -85,9 +116,28 @@ def _status_text(job: dict) -> str:
         f"🎵 ジョブ {job['id']} | ステージ: {job['stage']}\n"
         f"テーマ: {job.get('theme') or '-'}\n"
         f"タイトル: {job.get('title') or '-'}\n"
-        f"音源: {job.get('audio_url') or '-'}\n"
+        f"Suno URL: {job.get('suno_url') or '-'}\n"
+        f"音源DL: {'✅' if job.get('audio_path') else '-'}\n"
+        f"サムネ: {'✅' if job.get('thumbnail_path') else '-'}\n"
+        f"動画: {'✅' if job.get('video_path') else '-'}\n"
         f"YouTube: {job.get('youtube_url') or '-'}"
     )
+
+
+def _assets_status(job: dict) -> str:
+    has_audio = bool(job.get("audio_path"))
+    has_thumb = bool(job.get("thumbnail_path"))
+    if has_audio and has_thumb:
+        return (
+            f"✅ 音源・サムネ両方そろったよ (job {job['id']})\n"
+            f"動画化するなら「OK2」、サムネ差し替えなら別画像を送ってね"
+        )
+    missing = []
+    if not has_audio:
+        missing.append("Sunoの公開URL")
+    if not has_thumb:
+        missing.append("サムネ画像")
+    return f"📥 受け取ったよ。あと必要なもの: {' / '.join(missing)}"
 
 
 async def _step_lyrics(user_id: str, theme: str, existing_job_id: str = None) -> str:
@@ -102,7 +152,7 @@ async def _step_lyrics(user_id: str, theme: str, existing_job_id: str = None) ->
         style=data["style"],
         title=data["title"],
         description=data["description"],
-        stage="lyrics",
+        stage="assets",
     )
     return (
         f"📝 歌詞できたよ (job {job['id']})\n\n"
@@ -110,60 +160,43 @@ async def _step_lyrics(user_id: str, theme: str, existing_job_id: str = None) ->
         f"【スタイル】{data['style']}\n\n"
         f"{data['lyrics']}\n\n"
         f"---\n"
-        f"OKなら「OK1」、修正したいなら「やり直し1 <指示>」"
+        f"次の手順:\n"
+        f"1. Sunoでこの歌詞・スタイルで生成\n"
+        f"2. 曲ページを「Public」公開してURLをコピー\n"
+        f"3. URLをLINEに送る\n"
+        f"4. Gensparkでサムネ画像を作ってLINEに送る\n"
+        f"\n修正したい場合は「やり直し1 <指示>」"
     )
 
 
-async def _step_suno(job_id: str, regenerate: bool = False) -> str:
-    job = job_store.get_job(job_id)
-    if not job or not job.get("lyrics"):
-        return "❌ 歌詞がない。「曲：〇〇」から始めてね"
-    job_store.update_job(job_id, stage="music")
-
-    task_id = await suno_handler.submit_generation(
-        lyrics=job["lyrics"], style=job["style"] or "J-POP", title=job["title"] or "untitled"
-    )
-    job_store.update_job(job_id, suno_task_id=task_id)
-
-    # ポーリングはバックグラウンドで実行
-    asyncio.create_task(_poll_suno_and_notify(job_id, task_id))
-
-    return (
-        f"🎶 SUNOに投入したよ (task {task_id[:8]}...)。\n"
-        f"完了したら通知するね（数分かかる）"
-    )
-
-
-async def _poll_suno_and_notify(job_id: str, task_id: str):
-    """完了を待ち、ジョブを更新する。LINE通知はmain側のpush helperを呼ぶ。"""
-    from handlers import line_notifier  # 後方依存を避けるため遅延import
+async def _resolve_and_download_suno(job_id: str, suno_url: str):
+    from handlers import line_notifier
     try:
-        info = await suno_handler.wait_until_complete(task_id)
-        job_store.update_job(
-            job_id,
-            audio_url=info["audio_url"],
-            cover_url=info.get("image_url"),
-        )
+        os.makedirs(AUDIO_DIR, exist_ok=True)
+        audio_url = await suno_handler.resolve_audio_url(suno_url)
+        audio_path = os.path.join(AUDIO_DIR, f"{job_id}.mp3")
+        await suno_handler.download(audio_url, audio_path)
+        job_store.update_job(job_id, audio_url=audio_url, audio_path=audio_path)
         job = job_store.get_job(job_id)
-        text = (
-            f"🎵 音源できたよ (job {job_id})\n"
-            f"{info['audio_url']}\n\n"
-            f"視聴して問題なければ「OK2」、再生成するなら「やり直し2」"
-        )
-        await line_notifier.push(job["user_id"], text)
+        await line_notifier.push(job["user_id"], _assets_status(job))
     except Exception as e:
-        from handlers import line_notifier
         job = job_store.get_job(job_id)
         if job:
-            await line_notifier.push(job["user_id"], f"❌ SUNO生成失敗: {str(e)[:300]}")
+            await line_notifier.push(
+                job["user_id"],
+                f"❌ MP3取得失敗: {str(e)[:300]}\nSunoの曲が「Public」公開になってるか確認してね",
+            )
 
 
 async def _step_video(job_id: str) -> str:
     job = job_store.get_job(job_id)
-    if not job or not job.get("audio_url"):
-        return "❌ 音源がない。先にSUNO生成を完了させてね"
+    if not job:
+        return "❌ ジョブが見つからない"
+    if not job.get("audio_path"):
+        return "❌ 音源がまだないよ。SunoのURLを送ってね"
+    if not job.get("thumbnail_path"):
+        return "❌ サムネ画像がまだないよ。画像を送ってね"
     job_store.update_job(job_id, stage="video")
-
     asyncio.create_task(_render_video_and_notify(job_id))
     return f"🎬 動画化を始めたよ (job {job_id})。完了したら通知するね"
 
@@ -172,27 +205,17 @@ async def _render_video_and_notify(job_id: str):
     from handlers import line_notifier
     try:
         job = job_store.get_job(job_id)
-        os.makedirs(AUDIO_DIR, exist_ok=True)
-        audio_path = os.path.join(AUDIO_DIR, f"{job_id}.mp3")
-        await suno_handler.download(job["audio_url"], audio_path)
-
-        cover_path = ""
-        if job.get("cover_url"):
-            cover_path = os.path.join(AUDIO_DIR, f"{job_id}_cover.jpg")
-            await suno_handler.download(job["cover_url"], cover_path)
-
         video_path = await video_handler.make_video(
-            audio_path=audio_path,
-            cover_path=cover_path,
+            audio_path=job["audio_path"],
+            cover_path=job["thumbnail_path"],
             title=job.get("title") or "untitled",
             job_id=job_id,
         )
-        job_store.update_job(job_id, video_path=video_path)
+        job_store.update_job(job_id, video_path=video_path, stage="video_ready")
         text = (
             f"🎬 動画できたよ (job {job_id})\n"
             f"ローカル: {video_path}\n\n"
-            f"YouTube投稿するなら「OK3 タイトル:〇〇 説明:〇〇」（省略可）\n"
-            f"再生成は「やり直し2」"
+            f"YouTube投稿するなら「OK3 タイトル:〇〇 説明:〇〇」（省略可）"
         )
         await line_notifier.push(job["user_id"], text)
     except Exception as e:
@@ -204,9 +227,8 @@ async def _render_video_and_notify(job_id: str):
 async def _step_youtube(job_id: str, custom_title: str = None, custom_desc: str = None) -> str:
     job = job_store.get_job(job_id)
     if not job or not job.get("video_path"):
-        return "❌ 動画がない。先に「OK2」で動画化してね"
+        return "❌ 動画がまだない。先に「OK2」で動画化してね"
     job_store.update_job(job_id, stage="youtube")
-
     asyncio.create_task(_upload_and_notify(job_id, custom_title, custom_desc))
     return f"📤 YouTubeに送ってるよ (job {job_id})。完了したら通知するね"
 
@@ -219,7 +241,7 @@ async def _upload_and_notify(job_id: str, custom_title: str = None, custom_desc:
             video_path=job["video_path"],
             title=custom_title or job.get("title") or "untitled",
             description=custom_desc or job.get("description") or "",
-            tags=["SUNO", "AI音楽"],
+            tags=["Suno", "AI音楽"],
             privacy=YOUTUBE_PRIVACY,
         )
         job_store.update_job(job_id, youtube_url=result["url"], stage="done")

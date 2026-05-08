@@ -19,14 +19,6 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      - key: SUNOAPI_KEY
-        sync: false
-      - key: SUNOAPI_BASE
-        value: https://api.sunoapi.org
-      - key: SUNOAPI_MODEL
-        value: V4
-      - key: SUNOAPI_CALLBACK_URL
-        sync: false
       - key: YOUTUBE_CLIENT_ID
         sync: false
       - key: YOUTUBE_CLIENT_SECRET
@@ -41,3 +33,5 @@ services:
         value: /tmp/nori_videos
       - key: AUDIO_DIR
         value: /tmp/nori_audio
+      - key: THUMB_DIR
+        value: /tmp/nori_thumbs

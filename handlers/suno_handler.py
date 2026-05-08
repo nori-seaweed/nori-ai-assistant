@@ -1,97 +1,102 @@
+"""
+Suno公開URLからMP3を取得するモジュール。
+ToS準拠：ユーザーが「Public」公開した自分の曲のみ対象。
+APIではなく、公開ページのHTMLからMP3 URLを抽出してダウンロードする。
+"""
 import os
-import asyncio
+import re
+import json
 import httpx
 
-SUNO_API_KEY = os.getenv("SUNOAPI_KEY")
-SUNO_BASE = os.getenv("SUNOAPI_BASE", "https://api.sunoapi.org")
-# 利用するSUNOモデル。sunoapi.orgの仕様に合わせる
-SUNO_MODEL = os.getenv("SUNOAPI_MODEL", "V4")
-# コールバックURLは必須。設定しない場合は/suno-callbackを内部で使用する想定
-SUNO_CALLBACK_URL = os.getenv("SUNOAPI_CALLBACK_URL", "")
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+# https://suno.com/song/<uuid> など
+SUNO_URL_RE = re.compile(
+    r"https?://(?:www\.)?suno\.com/(?:song|s)/([a-zA-Z0-9_-]+)", re.IGNORECASE
+)
+# 直接CDN MP3も許容
+DIRECT_MP3_RE = re.compile(r"https?://[^\s]+\.mp3(?:\?[^\s]*)?", re.IGNORECASE)
 
 
-class SunoError(RuntimeError):
+class SunoFetchError(RuntimeError):
     pass
 
 
-def _headers() -> dict:
-    if not SUNO_API_KEY:
-        raise SunoError("SUNOAPI_KEY is not set")
-    return {
-        "Authorization": f"Bearer {SUNO_API_KEY}",
-        "Content-Type": "application/json",
-    }
+def find_suno_url(text: str) -> str | None:
+    if not text:
+        return None
+    m = SUNO_URL_RE.search(text)
+    if m:
+        return m.group(0)
+    m = DIRECT_MP3_RE.search(text)
+    return m.group(0) if m else None
 
 
-async def submit_generation(lyrics: str, style: str, title: str) -> str:
-    """
-    sunoapi.org の /api/v1/generate にカスタムモード（歌詞指定）でリクエスト。
-    成功時に taskId を返す。
-    """
-    payload = {
-        "customMode": True,
-        "instrumental": False,
-        "prompt": lyrics,
-        "style": style,
-        "title": title,
-        "model": SUNO_MODEL,
-        "callBackUrl": SUNO_CALLBACK_URL or "https://example.com/none",
-    }
-    async with httpx.AsyncClient(timeout=60.0) as cli:
-        r = await cli.post(f"{SUNO_BASE}/api/v1/generate", json=payload, headers=_headers())
+async def _fetch_page(url: str) -> str:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
+        r = await cli.get(url, headers={"User-Agent": USER_AGENT})
         if r.status_code >= 400:
-            raise SunoError(f"submit failed: {r.status_code} {r.text[:200]}")
-        data = r.json()
-        # sunoapi.org は { code: 200, data: { taskId: "..." } } を返す
-        task_id = (data.get("data") or {}).get("taskId") or data.get("taskId")
-        if not task_id:
-            raise SunoError(f"taskId not found in response: {data}")
-        return task_id
+            raise SunoFetchError(f"page fetch failed: {r.status_code}")
+        return r.text
 
 
-async def fetch_status(task_id: str) -> dict:
-    """生成状態を取得。完了時に audio_url / image_url を抽出して返す。"""
-    async with httpx.AsyncClient(timeout=30.0) as cli:
-        r = await cli.get(
-            f"{SUNO_BASE}/api/v1/generate/record-info",
-            params={"taskId": task_id},
-            headers=_headers(),
+def _extract_mp3_url(html: str) -> str | None:
+    """HTMLから音源URLを抽出。Suno share pageの構造変更にも複数戦略で対応。"""
+    # 戦略1: Next.jsの__NEXT_DATA__に audio_url が埋まっている
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            urls = _find_keys_recursive(data, ("audio_url", "audioUrl"))
+            if urls:
+                return urls[0]
+        except Exception:
+            pass
+    # 戦略2: JSON-LDのcontentUrl
+    for m in re.finditer(r'"contentUrl"\s*:\s*"([^"]+\.mp3[^"]*)"', html):
+        return m.group(1)
+    # 戦略3: 生のmp3 URLを直接探す
+    m = re.search(r"https?://[^\"'\s]+\.mp3(?:\?[^\"'\s]*)?", html)
+    if m:
+        return m.group(0)
+    return None
+
+
+def _find_keys_recursive(obj, keys: tuple) -> list:
+    found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in keys and isinstance(v, str) and v.startswith("http"):
+                found.append(v)
+            found.extend(_find_keys_recursive(v, keys))
+    elif isinstance(obj, list):
+        for item in obj:
+            found.extend(_find_keys_recursive(item, keys))
+    return found
+
+
+async def resolve_audio_url(suno_url: str) -> str:
+    """Suno共有URLから直接ダウンロード可能なMP3 URLを返す"""
+    if suno_url.lower().endswith(".mp3") or ".mp3?" in suno_url.lower():
+        return suno_url
+    html = await _fetch_page(suno_url)
+    mp3 = _extract_mp3_url(html)
+    if not mp3:
+        raise SunoFetchError(
+            "MP3 URLが見つからなかった。Sunoの曲ページが「Public」公開になってるか確認してね"
         )
-        if r.status_code >= 400:
-            raise SunoError(f"status failed: {r.status_code} {r.text[:200]}")
-        body = r.json()
-        data = body.get("data") or {}
-        status = (data.get("status") or "").upper()
-        # 完了時の構造: data.response.sunoData[0].audio_url / image_url
-        items = ((data.get("response") or {}).get("sunoData")) or []
-        first = items[0] if items else {}
-        return {
-            "status": status,
-            "audio_url": first.get("audio_url") or first.get("audioUrl"),
-            "image_url": first.get("image_url") or first.get("imageUrl"),
-            "raw": data,
-        }
-
-
-async def wait_until_complete(task_id: str, timeout_sec: int = 300, interval: int = 8) -> dict:
-    """完了までポーリング。timeoutで打ち切り。"""
-    elapsed = 0
-    while elapsed < timeout_sec:
-        info = await fetch_status(task_id)
-        if info["status"] in ("SUCCESS", "TEXT_SUCCESS", "FIRST_SUCCESS") and info.get("audio_url"):
-            return info
-        if info["status"] in ("FAILED", "ERROR", "CALLBACK_EXCEPTION"):
-            raise SunoError(f"generation failed: {info['raw']}")
-        await asyncio.sleep(interval)
-        elapsed += interval
-    raise SunoError(f"timeout after {timeout_sec}s for task {task_id}")
+    return mp3
 
 
 async def download(url: str, dest_path: str) -> str:
-    """音源/画像URLをローカルへ保存"""
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as cli:
-        r = await cli.get(url)
-        r.raise_for_status()
-        with open(dest_path, "wb") as f:
-            f.write(r.content)
+    os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+    async with httpx.AsyncClient(timeout=180.0, follow_redirects=True) as cli:
+        async with cli.stream("GET", url, headers={"User-Agent": USER_AGENT}) as r:
+            r.raise_for_status()
+            with open(dest_path, "wb") as f:
+                async for chunk in r.aiter_bytes(chunk_size=64 * 1024):
+                    f.write(chunk)
     return dest_path

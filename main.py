@@ -20,6 +20,7 @@ from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent,
     AudioMessageContent,
+    ImageMessageContent,
 )
 
 load_dotenv()
@@ -81,6 +82,11 @@ async def handle_event(event):
                     )
                 user_message = await transcribe_audio(audio_url, LINE_CHANNEL_ACCESS_TOKEN)
                 await process_and_push(user_id, user_message)
+                return
+
+            elif isinstance(event.message, ImageMessageContent):
+                # 画像メッセージはサムネとして音楽ジョブに紐付け
+                await _handle_image_message(user_id, event.message.id, event.reply_token)
                 return
 
         print(f"[handle_event] user_id={user_id} user_message={user_message}")
@@ -181,6 +187,57 @@ async def process_and_push(user_id: str, user_message: str):
                 )
             except Exception as push_err:
                 print(f"[process_and_push] PUSH ERROR: {push_err}")
+
+
+async def _handle_image_message(user_id: str, message_id: str, reply_token: str):
+    """LINE画像メッセージを取得し、音楽ジョブのサムネとして保存する"""
+    THUMB_DIR = os.getenv("THUMB_DIR", "/tmp/nori_thumbs")
+    os.makedirs(THUMB_DIR, exist_ok=True)
+    image_path = os.path.join(THUMB_DIR, f"{user_id}_{message_id}.jpg")
+
+    # 進行中ジョブがなければ通常の画像扱いとして無視
+    job = job_store.get_latest_job(user_id)
+    if not job:
+        try:
+            async with AsyncApiClient(configuration) as api_client:
+                line_api = AsyncMessagingApi(api_client)
+                await line_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=[TextMessage(text="🖼 進行中の音楽ジョブがないよ。先に「曲：<テーマ>」で始めてね")],
+                    )
+                )
+        except Exception as e:
+            print(f"[image] reply failed: {e}")
+        return
+
+    # 受信通知（reply）
+    try:
+        async with AsyncApiClient(configuration) as api_client:
+            line_api = AsyncMessagingApi(api_client)
+            await line_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[TextMessage(text="🖼 サムネ画像を取得中...")],
+                )
+            )
+    except Exception as e:
+        print(f"[image] reply failed: {e}")
+
+    # LINE Data APIから画像を取得
+    image_url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
+    headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as cli:
+            r = await cli.get(image_url, headers=headers)
+            r.raise_for_status()
+            with open(image_path, "wb") as f:
+                f.write(r.content)
+        result = await music_workflow.handle_image(user_id, image_path)
+        await line_notifier.push(user_id, result)
+    except Exception as e:
+        print(f"[image] download/handle failed: {e}")
+        await line_notifier.push(user_id, f"❌ 画像取得失敗: {str(e)[:200]}")
 
 
 @app.post("/webhook")
