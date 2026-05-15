@@ -23,6 +23,16 @@ services:
         sync: false
       - key: YOUTUBE_PRIVACY
         value: public
+      - key: BRAND_GENRE
+        value: Lo-fi Hip Hop, Chillhop
+      - key: BRAND_BPM
+        value: 70-85
+      - key: BRAND_MOOD
+        value: calm, emotional, nostalgic, focus-friendly
+      - key: BRAND_INSTRUMENTS
+        value: soft piano, mellow drums, vinyl crackle, ambient pads, jazzy guitar
+      - key: BRAND_VOCAL
+        value: female vocal, 30s, soft
       - key: JOB_DB_PATH
         value: /tmp/nori_jobs.db
       - key: VIDEO_DIR
