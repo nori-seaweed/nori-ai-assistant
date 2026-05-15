@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import asyncio
 from google import genai
 from google.genai import types
 
@@ -114,15 +115,27 @@ async def generate_lyrics(theme: str, instrumental: bool = False) -> dict:
             example_style=example_style,
         )
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=2048,
-            temperature=0.9,
-            response_mime_type="application/json",
-        ),
-    )
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=2048,
+                    temperature=0.9,
+                    response_mime_type="application/json",
+                ),
+            )
+            break
+        except Exception as e:
+            status = str(e)
+            is_retryable = "503" in status or "429" in status or "UNAVAILABLE" in status or "RESOURCE_EXHAUSTED" in status
+            if is_retryable and attempt < 2:
+                wait = 60 if "429" in status or "RESOURCE_EXHAUSTED" in status else 10
+                print(f"[lyrics] {status[:80]} → {wait}秒待ってリトライ ({attempt+1}/2)")
+                await asyncio.sleep(wait)
+            else:
+                raise
     text = response.text.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
     data = json.loads(text)
