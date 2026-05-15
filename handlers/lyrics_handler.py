@@ -5,7 +5,7 @@ from google import genai
 from google.genai import types
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL = "gemini-2.5-flash-lite"
+MODEL = "gemini-2.0-flash"
 
 # ブランドプロファイル（Render env vars で上書き可能）
 BRAND_GENRE = os.getenv("BRAND_GENRE", "Lo-fi Hip Hop, Chillhop")
