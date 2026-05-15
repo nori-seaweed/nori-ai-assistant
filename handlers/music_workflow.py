@@ -31,7 +31,7 @@ def is_music_command(text: str) -> bool:
     """通常のClaude応答ではなく音楽ワークフローに渡すべきメッセージか判定"""
     if not text:
         return False
-    if re.match(r"^\s*(曲[:：]|OK\s*[23]|やり直し\s*1|状態\s*$)", text):
+    if re.match(r"^\s*(曲[:：]|BGM[:：]|OK\s*[23]|やり直し\s*1|状態\s*$)", text, re.IGNORECASE):
         return True
     if suno_handler.find_suno_url(text):
         return True
@@ -44,20 +44,25 @@ async def handle(user_id: str, text: str) -> str:
 
     if text == "状態":
         job = job_store.get_latest_job(user_id)
-        return _status_text(job) if job else "🎵 進行中のジョブはないよ。「曲：<テーマ>」で始めてね"
+        return _status_text(job) if job else "🎵 進行中のジョブはないよ。「曲：<テーマ>」または「BGM：<テーマ>」で始めてね"
 
     m = re.match(r"^曲[:：]\s*(.+)$", text)
     if m:
-        return await _step_lyrics(user_id, m.group(1).strip())
+        return await _step_lyrics(user_id, m.group(1).strip(), instrumental=False)
+
+    m = re.match(r"^BGM[:：]\s*(.+)$", text, re.IGNORECASE)
+    if m:
+        return await _step_lyrics(user_id, m.group(1).strip(), instrumental=True)
 
     job = job_store.get_latest_job(user_id)
     if not job:
-        return "🎵 進行中のジョブがないよ。「曲：<テーマ>」で始めてね"
+        return "🎵 進行中のジョブがないよ。「曲：<テーマ>」または「BGM：<テーマ>」で始めてね"
 
     if re.match(r"^やり直し\s*1", text):
         instruction = re.sub(r"^やり直し\s*1\s*", "", text)
         new_theme = (job["theme"] or "") + (f" / 修正指示: {instruction}" if instruction else "")
-        return await _step_lyrics(user_id, new_theme, existing_job_id=job["id"])
+        prev_instrumental = bool(job.get("instrumental"))
+        return await _step_lyrics(user_id, new_theme, existing_job_id=job["id"], instrumental=prev_instrumental)
 
     suno_url = suno_handler.find_suno_url(text)
     if suno_url:
@@ -82,7 +87,7 @@ async def handle_suno_url(user_id: str, suno_url: str, job: dict = None) -> str:
     if job is None:
         job = job_store.get_latest_job(user_id)
     if not job:
-        return "🎵 先に「曲：<テーマ>」でジョブを始めてね"
+        return "🎵 先に「曲：<テーマ>」または「BGM：<テーマ>」でジョブを始めてね"
     job_store.update_job(job["id"], suno_url=suno_url)
     asyncio.create_task(_resolve_and_download_suno(job["id"], suno_url))
     return f"🎵 SunoのURLを受け取ったよ (job {job['id']})。MP3取得中..."
@@ -93,7 +98,7 @@ async def handle_image(user_id: str, image_path: str) -> str:
     job_store.init_db()
     job = job_store.get_latest_job(user_id)
     if not job:
-        return "🖼 先に「曲：<テーマ>」でジョブを始めてね"
+        return "🖼 先に「曲：<テーマ>」または「BGM：<テーマ>」でジョブを始めてね"
     job_store.update_job(job["id"], thumbnail_path=image_path)
     job = job_store.get_job(job["id"])
     return _assets_status(job)
@@ -102,7 +107,8 @@ async def handle_image(user_id: str, image_path: str) -> str:
 def _help_text() -> str:
     return (
         "🎵 受け付けたコマンドが分からないよ。\n"
-        "・曲：<テーマ>\n"
+        "・曲：<テーマ>     歌詞あり（Female vocal）\n"
+        "・BGM：<テーマ>    歌詞なし（Instrumental）\n"
         "・やり直し1 <指示>\n"
         "・SunoのURLをそのまま貼る\n"
         "・サムネ画像を送る\n"
@@ -140,12 +146,13 @@ def _assets_status(job: dict) -> str:
     return f"📥 受け取ったよ。あと必要なもの: {' / '.join(missing)}"
 
 
-async def _step_lyrics(user_id: str, theme: str, existing_job_id: str = None) -> str:
+async def _step_lyrics(user_id: str, theme: str, existing_job_id: str = None, instrumental: bool = False) -> str:
     if existing_job_id:
-        job = job_store.update_job(existing_job_id, theme=theme, stage="lyrics")
+        job = job_store.update_job(existing_job_id, theme=theme, stage="lyrics", instrumental=int(instrumental))
     else:
         job = job_store.create_job(user_id, theme)
-    data = await lyrics_handler.generate_lyrics(theme)
+        job = job_store.update_job(job["id"], instrumental=int(instrumental))
+    data = await lyrics_handler.generate_lyrics(theme, instrumental=instrumental)
     job_store.update_job(
         job["id"],
         lyrics=data["lyrics"],
@@ -154,6 +161,20 @@ async def _step_lyrics(user_id: str, theme: str, existing_job_id: str = None) ->
         description=data["description"],
         stage="assets",
     )
+    if instrumental:
+        return (
+            f"🎼 BGM素材できたよ (job {job['id']})\n\n"
+            f"【タイトル】{data['title']}\n"
+            f"【スタイル】{data['style']}\n"
+            f"【説明】{data['description']}\n\n"
+            f"---\n"
+            f"次の手順:\n"
+            f"1. Sunoで「Instrumental」モードON + このスタイルで生成\n"
+            f"2. 曲ページを「Public」公開してURLをコピー\n"
+            f"3. URLをLINEに送る\n"
+            f"4. Gensparkでサムネ画像を作ってLINEに送る\n"
+            f"\n修正したい場合は「やり直し1 <指示>」"
+        )
     return (
         f"📝 歌詞できたよ (job {job['id']})\n\n"
         f"【タイトル】{data['title']}\n"

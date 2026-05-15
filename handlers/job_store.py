@@ -35,10 +35,15 @@ def init_db():
                 thumbnail_path TEXT,
                 video_path TEXT,
                 youtube_url TEXT,
+                instrumental INTEGER DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
         """)
+        try:
+            c.execute("ALTER TABLE jobs ADD COLUMN instrumental INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at DESC)")
 
 
