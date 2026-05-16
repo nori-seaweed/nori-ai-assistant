@@ -147,12 +147,15 @@ def _assets_status(job: dict) -> str:
 
 
 async def _step_lyrics(user_id: str, theme: str, existing_job_id: str = None, instrumental: bool = False) -> str:
+    print(f"[music] _step_lyrics START theme={theme} instrumental={instrumental}")
     if existing_job_id:
         job = job_store.update_job(existing_job_id, theme=theme, stage="lyrics", instrumental=int(instrumental))
     else:
         job = job_store.create_job(user_id, theme)
         job = job_store.update_job(job["id"], instrumental=int(instrumental))
+    print(f"[music] Calling Gemini for lyrics...")
     data = await lyrics_handler.generate_lyrics(theme, instrumental=instrumental)
+    print(f"[music] Gemini OK: {data['title']}")
     job_store.update_job(
         job["id"],
         lyrics=data["lyrics"],
