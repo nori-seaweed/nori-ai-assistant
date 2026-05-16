@@ -31,10 +31,16 @@ def is_music_command(text: str) -> bool:
     """通常のClaude応答ではなく音楽ワークフローに渡すべきメッセージか判定"""
     if not text:
         return False
-    if re.match(r"^\s*(曲[:：]|BGM[:：]|OK\s*[23]|やり直し\s*1|状態\s*$)", text, re.IGNORECASE):
+    codes = [hex(ord(c)) for c in text[:10]]
+    print(f"[is_music_command] text={repr(text[:30])} codes={codes}")
+    m = re.match(r"^\s*(曲[:：]|BGM[:：]|OK\s*[23]|やり直し\s*1|状態\s*$)", text, re.IGNORECASE)
+    if m:
+        print(f"[is_music_command] MATCHED: {m.group(0)!r}")
         return True
     if suno_handler.find_suno_url(text):
+        print(f"[is_music_command] SUNO URL matched")
         return True
+    print(f"[is_music_command] NO MATCH")
     return False
 
 
