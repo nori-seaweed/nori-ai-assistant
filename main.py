@@ -2,6 +2,7 @@ import os
 import hashlib
 import hmac
 import base64
+import unicodedata
 from contextlib import asynccontextmanager
 
 import httpx
@@ -67,7 +68,7 @@ async def handle_event(event):
             print(f"[handle_event] MessageEvent user_id={user_id} msg_type={type(event.message).__name__}")
 
             if isinstance(event.message, TextMessageContent):
-                user_message = event.message.text
+                user_message = unicodedata.normalize("NFKC", event.message.text)
 
             elif isinstance(event.message, AudioMessageContent):
                 # 音声メッセージの場合はWhisperで文字起こし
