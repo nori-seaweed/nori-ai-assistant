@@ -8,18 +8,29 @@ from typing import Optional
 def _resolve_db_url(url: str) -> str:
     """Supabaseの直接接続URLをIPv4対応プーラーURLに変換する。
     RenderフリープランはIPv6非対応のため、
-    db.PROJECT.supabase.co → aws-0-REGION.pooler.supabase.com に切替える。
+    db.PROJECT.supabase.co → *.pooler.supabase.com (Transaction Pooler) に切替える。
+
+    Supabase API から取得した正確な接続設定:
+      host: aws-1-ap-northeast-1.pooler.supabase.com
+      port: 6543 (Transaction Pooler)
+      user: postgres.<project_ref>
     """
     m = re.match(
         r"postgresql://postgres:(.+)@db\.([^.]+)\.supabase\.co:5432/(.+)", url
     )
     if m:
         password, project_ref, db = m.groups()
-        # Supabaseプロジェクトのリージョン（ap-northeast-1 = 東京）
-        region = os.getenv("SUPABASE_REGION", "ap-northeast-1")
-        pooler = f"aws-0-{region}.pooler.supabase.com"
-        converted = f"postgresql://postgres.{project_ref}:{password}@{pooler}:5432/{db}"
-        print(f"[job_store] Supabase直接URLをプーラーURLへ変換: {pooler}")
+        # SUPABASE_POOLER_HOST を優先。未設定の場合は API 取得済みの既知値を使用
+        pooler = os.getenv(
+            "SUPABASE_POOLER_HOST",
+            "aws-1-ap-northeast-1.pooler.supabase.com",
+        )
+        port = os.getenv("SUPABASE_POOLER_PORT", "6543")
+        converted = (
+            f"postgresql://postgres.{project_ref}:{password}"
+            f"@{pooler}:{port}/{db}?sslmode=require"
+        )
+        print(f"[job_store] Supabase直接URLをプーラーURLへ変換: {pooler}:{port}")
         return converted
     return url  # 変換不要（すでにプーラーURLなど）
 
