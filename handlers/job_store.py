@@ -1,20 +1,49 @@
 import os
+import re
 import time
 import uuid
 from typing import Optional
 
+
+def _resolve_db_url(url: str) -> str:
+    """Supabaseの直接接続URLをIPv4対応プーラーURLに変換する。
+    RenderフリープランはIPv6非対応のため、
+    db.PROJECT.supabase.co → aws-0-REGION.pooler.supabase.com に切替える。
+    """
+    m = re.match(
+        r"postgresql://postgres:(.+)@db\.([^.]+)\.supabase\.co:5432/(.+)", url
+    )
+    if m:
+        password, project_ref, db = m.groups()
+        # Supabaseプロジェクトのリージョン（ap-northeast-1 = 東京）
+        region = os.getenv("SUPABASE_REGION", "ap-northeast-1")
+        pooler = f"aws-0-{region}.pooler.supabase.com"
+        converted = f"postgresql://postgres.{project_ref}:{password}@{pooler}:5432/{db}"
+        print(f"[job_store] Supabase直接URLをプーラーURLへ変換: {pooler}")
+        return converted
+    return url  # 変換不要（すでにプーラーURLなど）
+
+
 # DATABASE_URLが設定されていればPostgreSQL、なければSQLite（ローカル開発用）
-DATABASE_URL = os.getenv("DATABASE_URL")
+_RAW_DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = _resolve_db_url(_RAW_DATABASE_URL) if _RAW_DATABASE_URL else None
 
 if DATABASE_URL:
     import psycopg2
     import psycopg2.extras
 
     def _conn():
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         return conn
 
     def init_db():
+        try:
+            _init_db_internal()
+        except Exception as e:
+            print(f"[job_store] ERROR: PostgreSQL init_db失敗 → {e}")
+            print("[job_store] DB接続なしで起動継続（ジョブ操作時に再接続試行）")
+
+    def _init_db_internal():
         with _conn() as conn:
             with conn.cursor() as c:
                 c.execute("""
