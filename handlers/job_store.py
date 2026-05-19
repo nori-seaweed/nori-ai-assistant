@@ -78,15 +78,20 @@ if DATABASE_URL:
                         updated_at BIGINT NOT NULL
                     )
                 """)
-                # カラム追加（既存テーブルへの対応）
+                # SAVEPOINTを使ってCREATE TABLEをロールバックしないようにする
+                c.execute("SAVEPOINT sp_alter")
                 try:
                     c.execute("ALTER TABLE jobs ADD COLUMN instrumental INTEGER DEFAULT 0")
                 except Exception:
-                    conn.rollback()
+                    c.execute("ROLLBACK TO SAVEPOINT sp_alter")
+                c.execute("RELEASE SAVEPOINT sp_alter")
+
+                c.execute("SAVEPOINT sp_index")
                 try:
                     c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, updated_at DESC)")
                 except Exception:
-                    conn.rollback()
+                    c.execute("ROLLBACK TO SAVEPOINT sp_index")
+                c.execute("RELEASE SAVEPOINT sp_index")
             conn.commit()
 
     def _row_to_dict(row, cursor) -> Optional[dict]:
