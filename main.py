@@ -266,6 +266,26 @@ async def health():
     return {"status": "running", "message": "ノリのAIアシスタント稼働中 🚀"}
 
 
+@app.get("/db-status")
+async def db_status():
+    """DB接続確認用エンドポイント"""
+    try:
+        from handlers.job_store import DATABASE_URL, get_job
+        if not DATABASE_URL:
+            return {"db": "sqlite", "status": "ok", "message": "SQLiteモード（ローカル開発）"}
+        # PostgreSQL: 疎通確認
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM jobs")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return {"db": "postgresql", "status": "connected", "jobs_count": count, "pooler": DATABASE_URL.split("@")[1].split("/")[0]}
+    except Exception as e:
+        return {"db": "postgresql", "status": "error", "error": str(e)}
+
+
 @app.post("/test-push")
 async def test_push(request: Request):
     """デバッグ用: Gemini処理→Notion保存→LINE pushを直接テスト"""
