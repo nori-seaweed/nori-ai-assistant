@@ -288,6 +288,24 @@ async def db_status():
         return {"db": "postgresql", "status": "error", "error": str(e)}
 
 
+@app.get("/jobs")
+async def list_jobs():
+    """直近ジョブ一覧（デバッグ用）"""
+    try:
+        from handlers import job_store
+        import psycopg2
+        conn = psycopg2.connect(job_store.DATABASE_URL, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, stage, theme, title, suno_url, youtube_url, created_at, updated_at FROM jobs ORDER BY updated_at DESC LIMIT 10")
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return {"jobs": rows}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/test-push")
 async def test_push(request: Request):
     """デバッグ用: Gemini処理→Notion保存→LINE pushを直接テスト"""
