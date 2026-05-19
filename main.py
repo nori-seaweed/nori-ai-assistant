@@ -268,20 +268,22 @@ async def health():
 
 @app.get("/db-status")
 async def db_status():
-    """DB接続確認用エンドポイント"""
+    """DB接続確認用エンドポイント（init_dbも実行）"""
     try:
-        from handlers.job_store import DATABASE_URL, get_job
-        if not DATABASE_URL:
+        from handlers import job_store
+        if not job_store.DATABASE_URL:
             return {"db": "sqlite", "status": "ok", "message": "SQLiteモード（ローカル開発）"}
+        # init_dbを強制実行してテーブル作成を試みる
+        job_store._init_db_internal()
         # PostgreSQL: 疎通確認
         import psycopg2
-        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        conn = psycopg2.connect(job_store.DATABASE_URL, connect_timeout=5)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM jobs")
         count = cur.fetchone()[0]
         cur.close()
         conn.close()
-        return {"db": "postgresql", "status": "connected", "jobs_count": count, "pooler": DATABASE_URL.split("@")[1].split("/")[0]}
+        return {"db": "postgresql", "status": "connected", "jobs_count": count, "pooler": job_store.DATABASE_URL.split("@")[1].split("/")[0]}
     except Exception as e:
         return {"db": "postgresql", "status": "error", "error": str(e)}
 
